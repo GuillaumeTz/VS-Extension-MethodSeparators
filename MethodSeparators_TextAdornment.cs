@@ -107,7 +107,7 @@ namespace MethodSeparators
                         nextLineText.Contains("(") &&
                         nextLineText.Contains(")") &&
                         !nextLineText.Contains(";") &&
-                        (nextLineText.EndsWith("{") || nextLineText.EndsWith(")"));
+                        (nextLineText.EndsWith("{") || nextLineText.EndsWith(")") || nextLineText.EndsWith("noexcept") || nextLineText.EndsWith("const") || nextLineText.EndsWith("final") || nextLineText.EndsWith("override"));
 
                     if (isFunctionDef)
 					{
