@@ -41,6 +41,7 @@ namespace MethodSeparators
     /// </remarks>
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [Guid(MethodSeparatorsPackage.PackageGuidString)]
+    [ProvideOptionPage(typeof(MethodSeparators.Options.DialogPageProvider.General), "Method Separators", "General", 0, 0, true)]
     public sealed class MethodSeparatorsPackage : AsyncPackage
     {
         /// <summary>

@@ -14,21 +14,24 @@ You should have received a copy of the GNU General Public License
 along with this program.If not, see < https://www.gnu.org/licenses/>.
 */
 
-
 using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Text.Formatting;
 using System;
+using System.Collections.Generic;
+using System.Windows.Documents;
 using System.Windows.Media;
 
 namespace MethodSeparators
 {
 	internal sealed class MethodSeparator_TextAdornment : IDisposable
 	{
-        private string FilePath;
+		private string FilePath;
 
-        private readonly IAdornmentLayer layer;
+		private readonly IAdornmentLayer layer;
 		private readonly IWpfTextView view;
+
+		List<int> updatedLines = new List<int>();
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="MethodSeparator_TextAdornment"/> class.
@@ -69,89 +72,114 @@ namespace MethodSeparators
 		/// <param name="e">The event arguments.</param>
 		internal void OnLayoutChanged(object sender, TextViewLayoutChangedEventArgs textViewLayoutChangedEventArgs)
 		{
-			int minLine = int.MaxValue ;
-			int maxLine = int.MinValue;
-			foreach (ITextViewLine line in textViewLayoutChangedEventArgs.NewOrReformattedLines)
+			updatedLines.Clear();
+			foreach (ITextViewLine textViewLine in textViewLayoutChangedEventArgs.NewOrReformattedLines)
 			{
-				minLine = Math.Min(line.Start.GetContainingLineNumber(), minLine);
-                maxLine = Math.Max(line.Start.GetContainingLineNumber(), maxLine);
-            }
-            this.CreateVisuals(minLine, maxLine);
-        }
+				updatedLines.Add(textViewLine.Start.GetContainingLineNumber());
+			}
+			RefreshVisuals();
+		}
 
-		private void CreateVisuals(int StartLineNumber, int EndLineNumber)
+		enum ESeparationType
 		{
-			IWpfTextViewLineCollection textViewLines = this.view.TextViewLines;
+			None,
+			Function,
+			Struct,
+			Class,
+			Enum,
+		}
 
-			//layer.RemoveAdornmentsByVisualSpan(textViewLines.FormattedSpan);
+		private ESeparationType CategorizeNextLine(string text)
+		{
+			// Simple heuristic for C++ function definition:
+			// - Line ends with '{' or optionally with ')' (for single-line function signatures)
+			// - Contains '(' and ')'
+			// - Does not start with '//' (not a comment)
+			// - Does not contain ';' (not a declaration or prototype)
+			bool isFunctionDef =
+				!string.IsNullOrEmpty(text) &&
+				!text.StartsWith("//") &&
+				!text.StartsWith("#") &&
+				!text.StartsWith("else if") &&
+				!text.StartsWith(",") &&
+				text.Contains("(") &&
+				text.Contains(")") &&
+				!text.Contains(";") &&
+				(text.EndsWith("{") || text.EndsWith(")") || text.EndsWith("noexcept") || text.EndsWith("const") || text.EndsWith("final") || text.EndsWith("override"));
 
-            for (int LineNumber = StartLineNumber; LineNumber <= EndLineNumber; ++LineNumber)
+			if (isFunctionDef)
 			{
-				bool isFunctionDef = false;
-                // if next line is a function definition then draw horizontal line
-                if (LineNumber + 1 < this.view.TextSnapshot.LineCount)
-                {
-                    ITextSnapshotLine nextLine = this.view.TextSnapshot.GetLineFromLineNumber(LineNumber + 1);
-                    string nextLineText = nextLine.GetText().Trim();
+				int firstParenthesisIndex = text.IndexOf('(');
+				// check that the line has a return type or access modifier
+				string beforeParenthesis = text.Substring(0, firstParenthesisIndex).Trim();
+				string[] tokens = beforeParenthesis.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+				isFunctionDef = tokens.Length >= 2 || beforeParenthesis.Contains("::"); // at least return type and function name
+			}
 
-                    // Simple heuristic for C++ function definition:
-                    // - Line ends with '{' or optionally with ')' (for single-line function signatures)
-                    // - Contains '(' and ')'
-                    // - Does not start with '//' (not a comment)
-                    // - Does not contain ';' (not a declaration or prototype)
-                    isFunctionDef =
-                        !string.IsNullOrEmpty(nextLineText) &&
-                        !nextLineText.StartsWith("//") &&
-                        !nextLineText.StartsWith("#") &&
-                        !nextLineText.StartsWith("else if") &&
-                        nextLineText.Contains("(") &&
-                        nextLineText.Contains(")") &&
-                        !nextLineText.Contains(";") &&
-                        (nextLineText.EndsWith("{") || nextLineText.EndsWith(")") || nextLineText.EndsWith("noexcept") || nextLineText.EndsWith("const") || nextLineText.EndsWith("final") || nextLineText.EndsWith("override"));
+			if (isFunctionDef)
+			{
+				return ESeparationType.Function;
+			}
 
-                    if (isFunctionDef)
-					{
-                        int firstParenthesisIndex = nextLineText.IndexOf('(');
-                        // check that the line has a return type or access modifier
-                        string beforeParenthesis = nextLineText.Substring(0, firstParenthesisIndex).Trim();
-						string[] tokens = beforeParenthesis.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-						isFunctionDef = tokens.Length >= 2 || beforeParenthesis.Contains("::"); // at least return type and function name
-                    }
-                }
+			if (text.StartsWith("class "))
+			{
+				return ESeparationType.Class;
+			}
 
-                if (!isFunctionDef)
-                    continue;
+			if (text.StartsWith("struct"))
+			{
+				return ESeparationType.Struct;
+			}
 
-                {
-					if (LineNumber - 1 < 0)
-						continue;
+			if (text.StartsWith("enum"))
+			{
+				return ESeparationType.Enum;
+			}
 
-                    ITextSnapshotLine SnapshotNextLine = this.view.TextSnapshot.GetLineFromLineNumber(LineNumber + 1);
-					// Create horizontal line addornment
-					// Assume 'layer' is your IAdornmentLayer, and 'textViewLine' is the IWpfTextViewLine you want to adorn
-					Geometry geometry = textViewLines.GetMarkerGeometry(SnapshotNextLine.Extent);
+			return ESeparationType.None;
+		}
+
+		private void RefreshVisuals()
+		{
+			double lineSeparatorThickness = Options.GeneralOptions.Instance.LineSeparatorThickness;
+			foreach (int LineNumber in updatedLines)
+			{
+				ESeparationType separationType = ESeparationType.None;
+				// if next line is a function definition then draw horizontal line
+				if (LineNumber < 0 || LineNumber >= this.view.TextSnapshot.LineCount)
+					continue;
+
+				ITextSnapshotLine nextLine = this.view.TextSnapshot.GetLineFromLineNumber(LineNumber);
+				string nextLineText = nextLine.GetText();
+				separationType = CategorizeNextLine(nextLineText.Trim());
+
+				if (separationType == ESeparationType.None)
+					continue;
+
+				{
+					ITextSnapshotLine SnapshotNextLine = this.view.TextSnapshot.GetLineFromLineNumber(LineNumber);
+					int startOffset = nextLineText.Length - nextLineText.TrimStart().Length;
+					SnapshotSpan span = new SnapshotSpan(SnapshotNextLine.Start.Add(startOffset), nextLineText.Length - startOffset);
+					Geometry geometry = this.view.TextViewLines.GetMarkerGeometry(span);
 					if (geometry != null)
 					{
-                        System.Windows.Shapes.Line line = new System.Windows.Shapes.Line
+						System.Windows.Shapes.Line line = new System.Windows.Shapes.Line
 						{
 							X1 = geometry.Bounds.Left,
 							X2 = geometry.Bounds.Left + this.view.ViewportWidth,
 							Y1 = geometry.Bounds.Top - 2,
 							Y2 = geometry.Bounds.Top - 2,
-							Stroke = Brushes.DarkSlateGray,        // Set your desired color
-							StrokeThickness = 2          // Set your desired thickness
+							Stroke = Brushes.DarkSlateGray,
+							StrokeThickness = lineSeparatorThickness
 						};
-
-						// Add the line to the adornment layer
 						layer.AddAdornment(
 							AdornmentPositioningBehavior.TextRelative,
-                            SnapshotNextLine.Extent,
-							null, // tag
+							SnapshotNextLine.Extent,
+							null,
 							line,
-							null  // removal callback
+							null
 						);
 					}
-
 				}
 			}
 		}
